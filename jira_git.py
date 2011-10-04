@@ -1,9 +1,53 @@
 import subprocess
 import re
-import SOAPpy
 import os
 import logging
-import urllib2
+import urlparse
+import xmlrpclib
+import sys
+import ConfigParser
+
+class Configured:
+  def __init__(self, filename):
+    self.filename = filename
+ 
+  def get_value(self, section, key):
+    try:
+      cfg = ConfigParser.ConfigParser()
+      cfg.read(self.filename)
+      value = cfg.get(section, key)
+    except:
+      return None
+    return value
+    
+
+  def save_value(self, section, key, value):
+    try:
+      cfg = ConfigParser.ConfigParser()
+      cfg.read(self.filename)
+    except Exception, e:
+      logging.warning("Failed to read %s" %s self.filename)
+      logging.debug(e)
+      return
+
+    try:
+      cfg.add_section(section)
+    except ConfigParser.DuplicateSectionError,e:
+      logging.debug("Section '%s' already exists in '%s'", section, self.filename)
+
+    try:
+      cfg.set(section, key, value)
+    except Exception, e:
+      logging.warning("Failed to add '%s' to '%s'", key, self.filename)
+      logging.debug(e)
+    
+    try:
+      with open(cfg_file_name, 'wb') as f
+        cfg.write(f)
+    except Exception, e:
+      logging.warning("Failed to write '%s'='%s' to file %s", key, value, self.filename)
+      logging.debug(e)
+      return
 
 class CLI:
   def execute(self, cmd):
@@ -17,11 +61,14 @@ class CLI:
 
 
 class Git(CLI):
+
+  def is_enabled(self, ref = None):
+    return True
   
   def last_commit_id(self):
     return self.execute("git log --pretty=format:%H -1")
   
-  def commit_range(self, start, end):
+  def commit_id_range(self, start, end):
     output = self.execute("git rev-list " + start + ".." + end)
     if output == "":
         return []
@@ -49,7 +96,10 @@ class Git(CLI):
     return username
 
   def get_config(self, name):    
-    return self.execute("git config '" + name + "'")
+    value = self.execute("git config '" + name + "'")
+    if value.strip() == "":
+      value = None
+    return value
 
   def commit_message_from_file(self, filename):
     if os.path.exists(filename):
@@ -58,7 +108,7 @@ class Git(CLI):
           return f.read()
 
       except Exception, e:
-        logging.error("Failed to open file '%s'", commit_msg_filename)
+        logging.error("Failed to open file '%s'", filename)
         logging.debug(e)    
     return None
   
@@ -67,146 +117,126 @@ class Git(CLI):
       id = self.last_commit_id()
     return self.execute("git rev-list --pretty --max-count=1 " + id)
 
+  def commit_from_file(self, filename):
+    msg = self.commit_message_from_file(filename)
+    if msg == None:
+      return None
+    else:
+      return Commit(None, msg, self.get_username())
+
+  def commit(self, id = None):
+    return Commit(id, self.get_author_username(id), self.commit_message(id))
+
+  def commit_range(self, start, end):
+    ids = commit_id_range(start, end)
+    return map(lambda i: self.commit(i), ids)
+
 
 class Jira:  
-  def __init__(self, url, username, password):
-    self.url = url.rstrip("/")
-    try:
-        handle = urllib2.urlopen(self.url + "/rpc/soap/jirasoapservice-v2?wsdl")
-        self.client = SOAPpy.WSDL.Proxy(handle)
-        self.login(username, password)
+  @staticmethod
+  def fromGitConfig(git):
+    return Jira(git.get_config("jira.url"), git.get_config("jira.username"), git.get_config("jira.password"), git.get_config("jira.project"))
 
-    except Exception, e:
-        logging.error("Invalid Jira URL: '%s'", url)
-        logging.error(e)    
+  @staticmethod
+  def fromConfiguration(filename = None):
+    if filename == None:
+      filename = os.environ['HOME'] + "/.jirarc"
+    config = Configured(filename)
+    url = config.get_value("jira", "url")
+    username = config.get_value("jira", "username")
+    password = config.get_value("jira", "password")
+    project = config.get_value("jira", "project")
+    return Jira(url, username, password, project)
+  
+  def __init__(self, url, username, password, projectKey):
+    self.url = url
+    self.username = username
+    self.password = password
+    self.projectKey = projectKey
     
-  
-  def login(self, username, password):
+  def validate(self, commit):
     try:
-      auth = self.client.login(username, password) 
-      try:
-        self.client.getIssueTypes(auth)
-        self.loginKey = auth
-
-      except Exception,e:
-        logging.error("User '%s' does not have access to Jira issues" % username)
-        logging.error(e)
-        self.loginKey = None
-
+	proxy = xmlrpclib.ServerProxy(urlparse.urljoin(self.url, '/rpc/xmlrpc'))
+	acceptance, comment = proxy.commitacc.acceptCommit(self.username, self.password, commit.username, self.projectKey, commit.message).split('|')
     except Exception,e:
-      logging.error("Login failed")
-      logging.error(e)
-      self.loginKey = None
-
-  def get_issue(self, key):
-    issue = None
-    try:
-      issue = self.client.getIssue(self.loginKey, key)
-      logging.debug("Found issue '%s' in Jira: (%s)",  key, issue["summary"])
-
-    except Exception, e:
-        logging.error("No such issue '%s' in Jira", key)
         logging.error(e)
-
-    return issue
-  
-  #TODO: Make this better. Maybe we should abort when this happens
-  def check_assignment(self, issue, username):
-    assignee = issue['assignee']
-    return assignee == username
- 
-  def check_resolution(self, issue):
-    if issue['resolution'] != None:
-      logging.error("The issue has already been resolved, reopen, then commit/push again")
-      return False
-    return True
-
-  def validate(self, keys, username):
-    invalid = []
-    for key in keys:
-      issue = self.get_issue(key)
-      if issue == None:
-        invalid.append("%s did not exist." % key)
-      else:
-        if not self.check_assignment(issue, username):
-           invalid.append("%s was not assigned to you, but was assigned to %s" % (key, issue['assignee']))
-        if not self.check_resolution(issue):
-           invalid.append("%s is already resolved, reopen, then try again" % key)
-
-    return invalid
-
+	acceptance, comment = ['false', 'Unable to connect to the JIRA server at "' + self.url + '".']
+    logging.info(comment)
+    if acceptance == "false":
+      commit.set_error(comment)
+    return acceptance == "true"
 
 
 class Commit:
-  def __init__(self, id, issues, username):
+  def __init__(self, id, message, username):
     self.id = id
-    self.issues = issues
+    self.message = message
     self.username = username
-    self.errors = []
+    self.error = None
 
-  def has_errors(self):
-    return len(self.errors) > 0
+  def set_error(self, message):
+    self.error = message
 
-  def has_issues(self):
-    return len(self.issues) > 0
+  def has_error(self):
+    self.error != None
 
   def __repr__(self):
-    return "id: %s, issues : (%s), username %s, errors" % (self.id, self.issues, self.username, self.errors)
-
-  def message(self):
-    if self.id == None:
-     return "Your commit message had the following jira errors\n%s" % self.errors
-    elif self.has_errors:
-      return "The commit with id %s had the following jira errors\n%s" % (self.id, self.errors)
-    else:
-      return "The commit had no errors"
-
-class IssueParser:
-  
-  def __init__(self, project):
-    self.pattern = re.compile("(\%s-\d\d*)" % project)
+    return "Commit: id: %s, username %s, message %s" % (self.id, self.username, self.message)
  
-  def find_issues(self, commit_msg):
-    iterator = self.pattern.finditer(commit_msg)
-    issues = []
-    for match in iterator: 
-      key = match.group(1)
-      issues.append(key) 
-    return issues
-
-
 class Validator:
 
-  def __init__(self):
-    self.git = Git()
-    #self.git.get_config("jira.url")
-    self.jira = createJira()
-    self.parser = IssueParser("FASIT")
+  def __init__(self, jira = None):
+    self.git = Git()    
+    if jira == None:
+      jira = Jira.fromGitConfig(git)
+    self.jira = jira
 
   def commit_msg(self, filename):
-    msg = self.git.commit_message_from_file(filename)
-    if msg != None:
-      commit = Commit(None, self.parser.find_issues(msg), self.git.get_username())
-      if not commit.has_issues(): 
-        logging.error("No issues where referenced in the commit. aborting")
+    if self.git.is_enabled():
+      commit = self.git.commit_from_file(filename)
+      if commit == None:
         return 1
-      invalid = self.check_issues([commit])
-      if len(invalid) > 0:
-        for i in invalid:
-          logging.error(i.message())
+      elif not self.jira.validate(commit):
+        print >> sys.stderr, "Commit rejected, error was %s" % (commit.error)
         return 1
-      
     return 0
 
-  def update(self, ref, start, end):   
-    pass
+  def update(self, ref, start, end):
+    if self.git.is_enabled(ref):
+     commits = self.git.commit_range(start, end)
+     for c in commits:
+       self.jira.validate(c)
+     
+     withErrors = filter(lambda c: c.has_error())
+     if len(withErrors) > 0:
+       for c in commits:
+         print >> sys.stderr, "Commit with id %s rejected, error was %s" % (c.id, c.error)
+       return 1               
+     return 0
 
-  def check_issues(self, commits):
-    invalid = []
-    for commit in commits:
-      commit.errors = self.jira.validate(commit.issues, commit.username)
-      if commit.has_errors:
-        invalid.append(commit)
-      
-    return invalid  
+if __name__ == "__main__":
+  #Change this if you need to specify a different jira than the one configured in 
+  jira = None  
+
+  # Change this value to "CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET" 
+  # as appropriate.
+  # loglevel=logging.INFO
+  loglevel=logging.DEBUG
+  myname = os.path.basename(sys.argv[0])
+  logging.basicConfig(level=loglevel, format=myname + ":%(levelname)s: %(message)s")  
+  v = Validator(jira)
+  if myname == "commit-msg":
+    v.commit_msg(sys.argv[1])
+  elif myname == "update":
+    if len(sys.argv) < 4:
+      logging.error("update hook called with incorrect no. of parameters")
+      sys.exit(1)
+    else:
+      ref = sys.argv[1] # This is of the form "refs/heads/<branchname>"
+      old_commit_id = sys.argv[2]
+      new_commit_id = sys.argv[3]
+      sys.exit(v.update(ref, old_commit_id, new_commit_id))
+  else:
+    print >> sys.stderr, "Unknown script name"
+    sys.exit(1)
 
