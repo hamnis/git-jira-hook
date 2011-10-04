@@ -284,7 +284,7 @@ if __name__ == "__main__":
     else:
       hook.commit_msg(sys.argv[1])
 
-  elif myname == "update":
+  elif myname == "update" or myname == "update.secondary":
     if len(sys.argv) < 4:
       logging.error("%s hook called with incorrect no. of parameters", myname)
       sys.exit(1)
