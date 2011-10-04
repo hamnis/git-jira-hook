@@ -1,3 +1,12 @@
+#!/usr/bin/env python
+
+# Purpose:
+# This is a git hook, to be used in an environment where git is used
+# as the source control and Jira is used for bug tracking.
+# 
+# See accompanying README file for help in using this.
+# 
+
 import subprocess
 import re
 import os
@@ -63,7 +72,49 @@ class CLI:
 class Git(CLI):
 
   def is_enabled(self, ref = None):
-    return True
+    if ref == None:
+      branch = self.get_current_branch()
+    else:
+      branch = self.get_branchname_from_ref(ref)
+
+    return is_enabled_for_branch(branch)
+
+  def get_current_branch(self):
+    buf = get_shell_cmd_output("git branch --no-color")
+    # buf is a multiline output, each line containing a branch name
+    # the line that starts with a "*" contains the current branch name
+
+    m = re.search("^\* .*$", buf, re.MULTILINE)
+    if m == None:
+      return None
+
+    return buf[m.start()+2 : m.end()]
+  
+  def get_branchname_from_ref(self, ref):
+    # "refs/heads/<branchname>"
+    if string.find(ref, "refs/heads") != 0:
+      logging.error("Invalid ref '%s'", ref)
+      raise ValueError("No branch found in %s" % ref)
+
+    return string.strip(ref[len("refs/heads/"):])
+
+  def is_enabled_for_branch(self, current_branch): 
+    logging.debug("Test if '%s' is enabled...", current_branch)
+    branchstr = get_config("git-jira-hook.branches")
+    if branchstr == None or branchstr.strip() == "":
+      logging.debug("All branches enabled")
+      return True
+
+    branchlist = string.split(branchstr, ',')
+
+    for branch in branchlist:
+      branch = branch.strip()
+      if current_branch == branch:
+        logging.debug("Current branch '%s' is enabled", current_branch)
+        return True
+
+    logging.debug("Curent branch '%s' is NOT enabled", current_branch)
+    return False
   
   def last_commit_id(self):
     return self.execute("git log --pretty=format:%H -1")
@@ -183,7 +234,7 @@ class Commit:
   def __repr__(self):
     return "Commit: id: %s, username %s, message %s" % (self.id, self.username, self.message)
  
-class Validator:
+class Hook:
 
   def __init__(self, jira = None):
     self.git = Git()    
@@ -215,28 +266,33 @@ class Validator:
      return 0
 
 if __name__ == "__main__":
-  #Change this if you need to specify a different jira than the one configured in 
+  #Change this if you need to specify a different jira than the one configured in git
   jira = None  
 
   # Change this value to "CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET" 
   # as appropriate.
-  # loglevel=logging.INFO
-  loglevel=logging.DEBUG
+  #loglevel=logging.INFO
+  #loglevel=logging.DEBUG
   myname = os.path.basename(sys.argv[0])
   logging.basicConfig(level=loglevel, format=myname + ":%(levelname)s: %(message)s")  
-  v = Validator(jira)
+  hook = Hook(jira)
   if myname == "commit-msg":
-    v.commit_msg(sys.argv[1])
+    if len(sys.argv) < 2:
+      logging.error("%s hook called with incorrect no. of parameters", myname)
+      sys.exit(1)
+    else:
+      hook.commit_msg(sys.argv[1])
+
   elif myname == "update":
     if len(sys.argv) < 4:
-      logging.error("update hook called with incorrect no. of parameters")
+      logging.error("%s hook called with incorrect no. of parameters", myname)
       sys.exit(1)
     else:
       ref = sys.argv[1] # This is of the form "refs/heads/<branchname>"
       old_commit_id = sys.argv[2]
       new_commit_id = sys.argv[3]
-      sys.exit(v.update(ref, old_commit_id, new_commit_id))
+      sys.exit(hook.update(ref, old_commit_id, new_commit_id))
   else:
-    print >> sys.stderr, "Unknown script name"
+    print >> sys.stderr, "Unknown script name, was %s" % myname
     sys.exit(1)
 
