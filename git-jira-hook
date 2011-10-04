@@ -15,6 +15,7 @@ import urlparse
 import xmlrpclib
 import sys
 import ConfigParser
+import string
 
 class Configured:
   def __init__(self, filename):
@@ -35,7 +36,7 @@ class Configured:
       cfg = ConfigParser.ConfigParser()
       cfg.read(self.filename)
     except Exception, e:
-      logging.warning("Failed to read %s" %s self.filename)
+      logging.warning("Failed to read %s" % self.filename)
       logging.debug(e)
       return
 
@@ -51,7 +52,7 @@ class Configured:
       logging.debug(e)
     
     try:
-      with open(cfg_file_name, 'wb') as f
+      with open(cfg_file_name, 'wb') as f:
         cfg.write(f)
     except Exception, e:
       logging.warning("Failed to write '%s'='%s' to file %s", key, value, self.filename)
@@ -77,7 +78,7 @@ class Git(CLI):
     else:
       branch = self.get_branchname_from_ref(ref)
 
-    return is_enabled_for_branch(branch)
+    return self.is_enabled_for_branch(branch)
 
   def get_current_branch(self):
     buf = get_shell_cmd_output("git branch --no-color")
@@ -100,7 +101,7 @@ class Git(CLI):
 
   def is_enabled_for_branch(self, current_branch): 
     logging.debug("Test if '%s' is enabled...", current_branch)
-    branchstr = get_config("git-jira-hook.branches")
+    branchstr = self.get_config("git-jira-hook.branches")
     if branchstr == None or branchstr.strip() == "":
       logging.debug("All branches enabled")
       return True
@@ -131,7 +132,7 @@ class Git(CLI):
   def get_author_email(self, id = None):
     if id == None:
       id = self.last_commit_id()
-    return "'%s'" % self.execute("git rev-list --max-count=1 --format=%ae " + commit_id).split("\n")[1].strip()
+    return "%s" % self.execute("git rev-list --max-count=1 --format=%ae " + id).split("\n")[1].strip()
     
   def get_author_username(self, id = None):
     email = self.get_author_email(id)
@@ -176,10 +177,10 @@ class Git(CLI):
       return Commit(None, msg, self.get_username())
 
   def commit(self, id = None):
-    return Commit(id, self.get_author_username(id), self.commit_message(id))
+    return Commit(id, self.commit_message(id), self.get_author_username(id))
 
   def commit_range(self, start, end):
-    ids = commit_id_range(start, end)
+    ids = self.commit_id_range(start, end)
     return map(lambda i: self.commit(i), ids)
 
 
@@ -212,7 +213,8 @@ class Jira:
     except Exception,e:
         logging.error(e)
 	acceptance, comment = ['false', 'Unable to connect to the JIRA server at "' + self.url + '".']
-    logging.info(comment)
+    logging.debug(comment)
+    logging.debug("Commit was accepted: %s", acceptance)
     if acceptance == "false":
       commit.set_error(comment)
     return acceptance == "true"
@@ -239,7 +241,7 @@ class Hook:
   def __init__(self, jira = None):
     self.git = Git()    
     if jira == None:
-      jira = Jira.fromGitConfig(git)
+      jira = Jira.fromGitConfig(self.git)
     self.jira = jira
 
   def commit_msg(self, filename):
@@ -254,14 +256,13 @@ class Hook:
 
   def update(self, ref, start, end):
     if self.git.is_enabled(ref):
-     commits = self.git.commit_range(start, end)
-     for c in commits:
-       self.jira.validate(c)
+     commits = self.git.commit_range(start, end)     
      
-     withErrors = filter(lambda c: c.has_error())
+     withErrors = filter(lambda c: not self.jira.validate(c), commits)
+
      if len(withErrors) > 0:
        for c in commits:
-         print >> sys.stderr, "Commit with id %s rejected, error was %s" % (c.id, c.error)
+         print >> sys.stderr, "Commit with id %s rejected, author is %s, error was %s" % (c.id, c.username, c.error)
        return 1               
      return 0
 
@@ -271,7 +272,7 @@ if __name__ == "__main__":
 
   # Change this value to "CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET" 
   # as appropriate.
-  #loglevel=logging.INFO
+  loglevel=logging.INFO
   #loglevel=logging.DEBUG
   myname = os.path.basename(sys.argv[0])
   logging.basicConfig(level=loglevel, format=myname + ":%(levelname)s: %(message)s")  
